@@ -1,0 +1,455 @@
+---
+title: "Projet Statistique pour la génétique et génomique"
+author: "OUOROU Rachidou"
+date: "10/05/2022"
+output: pdf_document
+---
+
+
+\newpage
+
+```{r message=FALSE, warning=FALSE }
+#install.packages("ISLR")
+library(tidyverse)
+library(ISLR)
+library(FactoMineR)
+library(factoextra)
+library(ade4)
+library(ComplexHeatmap)
+library("circlize")
+library(golubEsets)
+library(pls)
+library(plsgenomics)
+```
+
+# Introduction
+
+Le but de ce projet est d'analyser les données génétique de trois sources différentes. Dans une première partie nous étudierons les données **NCI-60**. L'objectif de cette partie sera de classifier les différentes lignes cellulaire en différents type de cancer. Ensuite on étudiera des données portant sur le cancer de la prostate. Ici, l'objectif est d'étudier les liens entre différents gènes et le statut cancéreux des individus. Pour finir, on s'intéresse aux données **Golub** pour étudier le lien entre l'expression des gènes et le type de leucémie. 
+
+# 1. Données NCI-60
+
+L'objectif de la pharmacogénétique est d'étudier les différents profils moléculaires des cellules tumorales afin de proposer des traitements plus appropriés et efficaces à ces tumeurs. Pour atteindre cet objectif on peut soit faire des essais cliniques afin d'étudier les réaction chez les patients lors des expériences ou étudier directement les lignées cellulaires cancéreuses concernée. La première est difficile à réaliser pour des raisons d'éthique, d'effets externes, et bien d'autres. La deuxième méthode est utilisé par le Developmental Therapeutics Program (DTP) du US National Cancer Institute (NCI) sun un panel de 60 lignée pour tester les agents anticancéreux potentiels. Les cellules ont été caractérisées pharmacologiquement par une exposition à plus de 100 000 composés chimiques définis (plus un grand nombre d'extraits de produits naturels), un à la fois et indépendamment.
+
+Un petit aperçu des différentes lignées cellulaire concernées.
+```{r}
+library(rvest)
+list = read_html("https://en.wikipedia.org/wiki/NCI-60") %>% 
+  html_table(fill = TRUE) 
+
+lignee = list[[1]]
+t(lignee[, 1]) %>% as.vector()
+```
+
+
+- Chargement du jeu de donnée
+
+```{r}
+data("NCI60")
+#help("NCI60")
+data = NCI60$data
+type = NCI60$labs
+```
+
+Le jeu de donnée contient l'expression de `r dim(data)[2]` gènes pour `r dim(data)[1]` lignées cellulaires. Par contre, les lignées concernées ne sont pas précisées, mais plutôt le type de cancer correspondant. 
+
+On présente dans le tableau suivant les différents type de cancer.
+
+```{r}
+table(type) %>% 
+  sort(decreasing = T)  %>% 
+  addmargins() %>% 
+  knitr::kable() %>% 
+  t()
+```
+
+Les lignées les plus représenté parmi les 64  sont celles associé au "Non-Small Cell Lung Cancer" et au cancer Rénal.
+
+
+On réalise un boxplot de l'expression des gènes pour chacune des lignées.
+```{r}
+boxplot(t(data))
+```
+On remarque que les expressions sont plutôt normalisée et ont le même ordre de grandeur.
+
+On aimerais savoir s'il est possible de regroupé certaines lignée cellulaire, c'est-à-dire si les gènes s'expriment de façon similaire en présences de ces celulles. 
+
+## 1.1 Analyse en composante principales
+Mais vu que le nombre de gènes est très grand (6380), on ne peut pas visualiser ce rapprochement des lignée à travers un nuages de points. On se propose de cet fait de réduire la dimension de ces données afin de les visualiser sur un nuage de point. On réalise donc une analyse en composante principale (ACP) à cet effet.
+
+### 1.1.1. Principe ACP
+Cette méthode consiste à projeté un jeu de donnée de grande dimension dans un espace à dimension plus réduite tout en conservant un maximum de variance des données initiales. Ainsi on part d'un nuage à $n*p$ dimensions  à un nuage de points à $n*r$ dimension (avec $r \leq p$). En génétique, généralement $p >> n$. Le nombre de gènes étudié est très grand pour peu d'individus (grande dimension). On utilise donc cette méthode afin d'avoir moins de dimensions avec le plus d'information possible.
+
+### 1.1.2. Application
+
+```{r}
+data1 = data.frame(type, data)
+acp = PCA(data1[, -1], graph = F)
+
+fviz_eig(acp, addlabels=TRUE) +
+  labs(title = "Pourcentages de variance expliquée en fonction des composantes")
+
+```
+
+Ce graphique présente le pourcentage de variances contenu dans les dimensions de l'ACP. On remarque qu'avec la première composante, on on a $11.4%$ de la variance de départ. On projette les données sur les deux premières dimensions nous permettant de retenir $18.2%$ de la variance.
+
+
+```{r}
+plot(acp, axes = c(1, 2), choix = "ind")
+```
+
+Sur ce graphique, on remarque un groupe qui se distingue dans le cadran en haut à  gauche. On a trois autres groupe concentrée dans chaque cadran même si la distinction n'est pas très nette. 
+
+On rajoute a ce graphique les type de cancer afin de vérifier sa pertinence. 
+
+```{r}
+acp = PCA(data1, graph = F, quali.sup = 1 )
+plot(acp, axes = c(1, 2), choix = "ind", habillage = 1)
+```
+
+On remarque bien que les lignées cellulaire du cadran (-, +) correspond essentiellement au cancer Melanoma. En général, les lignés cellulaire proche sur le graphique sont du même type de cancer. 
+Bien qu'on ait perdu de l'information après réduction de dimension, les résultats sont plutôt pertinent dans la mesure les lignées cellulaire de même type sont assez proche sur le graphique.
+
+## 1.2 Classification Ascendante Hiérachique (CAH)
+
+On souhaite maintenant classifier les lignées cellulaires en  utilisant une CAH. 
+
+### 1.2.1 Principe CAH
+
+Le pricipe de la CAH consiste à calculer la distance entre les individus et de regrouper les individus les plus proche au sens de la distance choisie (euclidienne, Mahalanobis, etc...). Il convient aussi de choisir le critère permettant de calculé la distance entre deux groupes. Il existe les méthodes minimium, maximum, ward, etc.
+
+Au début, chaque individu est dans un classe. Ils sont succècivement aggréger a chaque étape jusqu'a ce que tout le monde ne forme qu'une classe.
+
+Afin de décider de la meilleur stratégie d'agréggation on réalisera la classification pour chacune de ces méthodes en choisissant la meilleure méthode aux vues des dendrogramme.
+
+Le boxplot des données réalisée plus haut montre que les données étaient plutôt normalisée. On teste donc les différentes stratégies avec la distance euclidienne.
+
+```{r}
+library(ade4)
+par(mfrow = c(2, 2))
+dist = dist.quant(data, method = 1)
+for (j in c("single", "complete", "average", "ward.D2")) {
+  res = hclust(dist, method = j)
+  plot(res, hang = -1)
+}
+
+```
+
+La stratégie du minim et celle des centroïdes ne fournit de dendrogramme assez lisible contrairement a la stratégie du maximum et de ward. On retient celle de ward qui parait plus nette. 
+
+```{r}
+res = hclust(dist, method = "ward.D2")
+plot(res, hang = -1)
+```
+
+A cette étape, il faut décider a quel niveau couper l'arbre afin d'obtenir les classe. On utlise le critères du saut maximal à cet effet.
+
+```{r}
+## Critère du saut de maximal
+which.max(diff(res$height))
+res$height[60:61]
+```
+Le maximal est observé à lors du passage de l'étape 60 à 61. On décide donc de couper l'arbre entre ces deux passages.
+
+```{r message=FALSE, warning=FALSE}
+fviz_dend(res, main="Ward Linkage", cex=.5,
+          k = 4, # cut in four groups
+          rect=TRUE,
+          palette="Spectral")
+```
+
+Remarquons déjà que le critère du saut maximal nous permet de retenir un classement en 4 classes comme on l'observait sur le nuages de poins des deux premières composantes de l'ACP.
+
+On compare également le classement obtenue des lignées cellulaire par CAH avec les vraie classement
+
+```{r}
+cl_cah = cutree(res, k = 4)
+table(type, cl_cah)
+```
+On remarque que la méthode est assez efficace. Par exemple, le 9 lignée cellulaire du cancer rénal sont dans la même classe (1). De même pour le Colon, leukemia, prostate, etc... Seul les lignées du cancer dunsein et NSCLC sont plus ou moins mal classé.  En général, les lignées celullaire du même cancer sont dans le même groupe et nous permet de confirmer la pertinence de la classification.
+
+Pour résumer cette première partie, on a utiliser l'analyse en composante principales afin d'afficher les lignées cellulaire sur un graphique. Ce graphique était plus ou moins en accord avec les type de cancer. Ensuite on réalise une classification ascendante hiérachique qui donne aussi de résultat pertinent dans le classenment des lignées, confirmé par le tableau de contingence.
+
+
+# 2. Donnée cancer prostate
+
+L'objectif de cette partie, est d'étudier le lien entre l'expression des gènes et le statut cancéreux des individus. Etant confronté au problème de grande dimension, on essaie dans une première partie de réduire la dimension grâce à l'ACP avant de proposer un autre alternative d'étude de ce lien.
+
+## 2.1 Réduction de dimension 
+
+### 2.1.1 Description des donnée
+```{r}
+prostate = read.csv("http://web.stanford.edu/~hastie/CASI_files/DATA/prostmat.csv")
+
+
+dim(prostate)
+```
+Le jeu de données contient l'expression de 6033 gènes collecté sur 102 individus
+
+On réalise un boxplot pour vérifié si les données ont normalisées.
+```{r}
+boxplot((prostate), las = 2)
+```
+Elles paraissent bien normalisées.
+
+```{r}
+statut = c(rep("Control", 50), rep("Cancer", 52))
+barplot(table(statut),col = c("red", "darkgreen"), horiz=TRUE, main = "Repartion du cancer de la prostate")
+```
+
+On a 50 individus contrôle (n'ayant pas le cancer) et 52 atteintes.
+
+### 2.1.2 ACP
+```{r}
+prostate2 = data.frame(t(prostate), statut)
+acp2 = PCA(prostate2, quali.sup = 6034, graph = F)
+plot(acp2, habillage = 6034, choix = "ind")
+```
+
+Remarquons que les deux premières dimensions ne permettent d'avoir que 4% de la variance initiales. Ce qui parait très peut si ces composantes devait servir de base pour toute analyse car elles ne refléterait pas la variance du jeu de données initiales. 
+
+```{r}
+which(as.vector(acp2$eig[, 3]) >80)
+```
+
+En effet pour avoir 80% de la variance expliqué par les axes principaux, il faudrait prendre en compte les 71 premiers axes. Puisque l'on a que 102, individus dans le jeu de données, un modèle à 70 coefficient parait peut raisonnable.
+
+## 2.2 Expression différentielle
+
+La réduction de dimension n'étant pas efficace dans ce cas, on propose donc de faire des test de student pour chacun des 6033 gènes du jeu de donné. Le test de student permet de tester l'égalité de deux moyenne. Ici on teste si l'expression moyenne des gènes chez les individus atteints de cancer est la même que chez les individus sains. On teste,
+
+- Hypothèse nulle : $H_0 : \mu_{cancer} = \mu_{control}$ contre
+- Hypothèse alternative : $H_0 : \mu_{cancer} \neq \mu_{control}$.
+
+On rejetera l'hypothèse nulle si la pvaleur du teste est plus petite que le seuil fixée arbitrairement ici à 10%. Dans lequel cas le gène serait exprimé différentiellement.
+
+```{r}
+p.values = apply(prostate, 1, function(x){t.test(x~ factor(statut))$p.value})
+
+
+sum(p.values < 0.1, na.rm = TRUE)
+```
+
+On remarque que pour 797 gènes, la p.valeur était inférieur à 10%. On serait donc tenté de dire que ces gènes sont associé au statut cancéreux. Cependant, les test étant réalisé indépendamment, cette erreur de 10% s'est acummulé sur les 6833 tests réalisé. On a donc un taux d'erreur très élevé qui fausse de ce fait cette conclusion. 
+
+On décide de ce fait d'apporté une correction a ces p-valeur afin d'ajusté le seuil de décision. On utilise a cet effet la correction de bonferroni et celle de Benjamini-Hochberg.
+
+La correction de bonferroni consiste à divisé le seuil de décision par le nombre de test réalisé
+
+```{r}
+
+sum(p.values < 0.1/length(p.values))
+# ou
+sum(p.adjust(p.values, method = "bonferroni") < 0.1)
+```
+
+Ainsi en appliquant la correction de bonferroni, on ne retient que 6 gènes différentiellement exprimés au seuil de 10%. Cette méthode est assez sévère et rejette beaucoup de variable. On décide de faire la correction de benjamini-Hochberg. 
+
+Cette méthode consiste à contrôler la proportions de fausses découvertes, c'est à dire la fréquence à la quelle on décide $H_1$ (alors que la vérité est $H_0$) parmi toutes les décisions $H_1$.
+
+```{r}
+p.values.BH=p.adjust(p.values,method="BH")
+
+sum(p.values.BH < 0.1, na.rm = T)
+```
+
+On remarque qu'avec la correction de BH est moins péssimiste et nous permet de retenir 57 gènes différentiellement exprimés
+
+Pour terminer cette partie, on décide de visualiser ces gènes différentiellement exprimés sur une heatmap.
+
+```{r}
+selecDE = which(p.values.BH <= 0.1)
+selecDE
+dataH = prostate[selecDE,]
+```
+
+```{r}
+ha = HeatmapAnnotation(statut = prostate2[, 6034] ,
+col = list("statut"= c("Cancer" = "red", "Control" = "green")))
+
+Heatmap(as.matrix(dataH), top_annotation = ha, 
+             clustering_method_rows = "ward.D",
+             clustering_method_columns = "ward.D",
+             clustering_distance_columns = "pearson",
+             row_names_gp = gpar(fontsize = 6),
+             column_names_gp = gpar(fontsize = 7)
+             ) 
+```
+
+Sur cette heatmap on peut observer 4 carrés assez homogènes en couleur. Pour la moitié des premiers gènes (3269 à 735), on remarque que ces gènes sont sur-exprimés chez les personnes saines et sous exprimés chez les personnes atteintes de cancer de la prostate. Mais les gènes en partant de 735, sont plutôt sur-exprimés chez les personnes atteintes de cancer et sous-exprimés chez les personnes saines.
+
+La suite de cette étape serait de faire une analyse d'enrichissement des différente fonctions de ces gènes, mais que nous n'aborderont pas dans ce projet.
+
+# 3. Données Golub
+
+L'objectif de cette partie est d'étudier le lien entre l'expression des gènes et le type de leucémie à savoir la leucémie aiguë lymphoblastique (ALL) et la leucémie aiguë myéloïde (AML). Comme précédemment on procédera à une réduction de dimension avant d'appliquer la régression logistique pour étudier le dit lien. On utilisera une deuxième méthode de réduction de dimension qu'est la PLS (Principal Least Square). 
+
+## 3.1. Chargement et transformation des données
+
+```{r}
+data(Golub_Merge) 
+x <- exprs(Golub_Merge)
+dim(x)
+```
+
+Le jeu de donnée contient l'expression de 7129 gènes collecté chez 72 individus. 
+
+On souhaite ensuite enlever les gènes dont l’expression n’est pas assez importante ou dont la variance n'est pas élevé.
+```{r}
+x[x < 100] <- 100
+x[x > 16000] <- 16000
+emax <- apply(x, 1, max)
+emin <- apply(x, 1, min)
+x <- x[emax/emin > 5 & emax - emin > 500, ]
+x <- log10(x)
+x <- t(scale(t(x)))
+x = data.frame(x)
+```
+
+```{r}
+statut = as.numeric(Golub_Merge$ALL.AML) - 1
+
+donnee = data.frame(X = I(t(x)), Y = statut)
+table(Golub_Merge$ALL.AML) %>% addmargins()
+```
+Parmi les 72 individus, 47 ont la leucémie ALL et 25 la leucémie AML. 
+
+## 3.2. ACP + regression logistique
+
+On se propose aussi de subdiviser le jeu de données en 2 parties: une partie servira à l’entraînement du modèle et une seconde partie pour la validation du modèle.
+
+```{r}
+set.seed(1)
+train <- rbinom(length(donnee$Y),1,0.8) 
+donnee.train <- c()
+donnee.test <- c()
+donnee.train$X <- donnee$X[train==1,] # donnee.train est une liste avec deux éléments
+donnee.train$Y <- donnee$Y[train==1]
+donnee.test$X <- donnee$X[train==0,] # donnee.test est une liste avec deux éléments
+donnee.test$Y <- donnee$Y[train==0]
+```
+
+On réalise l'ACP.
+```{r}
+pcrdonnee <- pcr(Y ~ X, data = donnee.train
+                 , scale = FALSE, 
+                validation="none") 
+summary(pcrdonnee)
+```
+On remarque que pour conserver 70% de la variance des données initiales, il nous faut retenir les 19 premières composantes. On décide donc dans un premier temp de récupérer les 19 premières composantes principales pour la régression logistique
+
+```{r}
+ncomponents <- 19
+donnee.train$reducedX <- pcrdonnee$scores[, 1:ncomponents] 
+pca.model <- glm(Y ~ reducedX, data = donnee.train, family = binomial)
+summary(pca.model)
+```
+
+On remarque déjà que l'algorithme de calcul des coefficient n'a pas convergé, les variances sont énormes et les statistique de test sont nulles. Le nombre de paramètres est assez important pour ce nombre d'individu. 
+
+On se restreint de ce fait aux trois premiers axes principaux qui nous permettent de conserver 27% de la variance des données.
+
+```{r}
+ncomponents <- 3
+donnee.train$reducedX <- pcrdonnee$scores[, 1:ncomponents] 
+pca.model <- glm(Y ~ reducedX, data = donnee.train, family = binomial)
+summary(pca.model)
+```
+D'après les résultat, le premier axe principal n'est pas significativement lié à la variable réponse (type de leucémie). On la retire du modèle en conservant les deux autres 
+```{r}
+ncomponents <- 3
+donnee.train$reducedX <- pcrdonnee$scores[, 2:ncomponents] 
+pca.model <- glm(Y ~ reducedX, data = donnee.train, family = binomial)
+summary(pca.model)
+```
+```{r}
+anova(pca.model, test = "LRT")
+```
+On réalise un test de significativité global du modèle. On teste si le modèle proposé est meilleur que le modèle nulle, c'est à dire le modèle ne contenant que la constante. On rejette ici l'hypothèse nulle et donc le modèle proposé est globalement significatif.
+
+On utilise donc ce modèle final pour prédire le type de leucémie des individus de la base test. On projette de ce fait ces individu sur le plan formé par les dimension 2 et 3. 
+
+```{r}
+gen_moy = apply(donnee.train$X, 2, mean) # moyenne d'expression par gènes
+bar_donnee_train <- matrix(rep(gen_moy, each = length(donnee.test$Y)), ncol = ncol(donnee.train$X)) # On répète 12 fois pour pouvoir centré les données test
+
+reduction.matrix <- pcrdonnee$loadings[,2:3] # Matrice de loadings pour la projection
+x_test_centered <- donnee.test$X - bar_donnee_train
+donnee.test$reducedX <- x_test_centered %*% reduction.matrix # Projections
+
+```
+
+Maintenant que la projection est faites, test le modèles sur ces données
+```{r}
+test.prediction <- predict(pca.model, newdata = donnee.test, type = "response")
+# Matrice de confusion
+table(true_value = donnee.test$Y, predictions = (test.prediction >0.5)*1)
+```
+
+La matrice de confusion, nous permet de comparé les prédiction réalisé aux vraies valeur du type de leucémie. On remarque que notre modèle ne fait aucune erreur de classement.
+
+## 3.3. PLS + regression 
+
+On décide maintenant de réduire la dimension des données en utilisant la PLS comme méthode de réduction. Rappelons que le principe, est le même: Partir d'un jeu de données à $n*p$ dimension pour un jeu de donnée à $n*r$ dimension avec r plus petit ou égale à n. Contrairement à l'acp qui cherche les composantes sorte à maximiser la variances contenu dans les données initiales, la PLS cherche plutôt à maximiser la covariance au carré entre la variable d'intérêt Y et les axes principaux.
+
+On met cela en pratique dans le code suivant.
+```{r}
+plsdonnee <- plsr(Y ~ X, data = donnee.train, scale = FALSE, 
+                 validation = "LOO")
+```
+
+Le choix du nombre d'axe dans ce cas ne se fait pas par maximisation de la variance mais par validation croisé ou leave one out. Ici on utlisera la validation leaveoneout qui consiste a retirer un individu de la base de donnée, à estimer le modèle et ensuite prédire la réponse de cet individu. Ce procédé est réalisé pour chaque individu et la fin l'erreur de prédiction du modèle sera la fréquence de mal classé des individu. 
+
+Cette méthode est donc réalisé en incluant au fur et a mesure des composantes principales dans le modèles. On choisira donc le nombre de composante en fonction de ces erreurs.
+
+```{r}
+
+summary(plsdonnee)
+
+```
+
+On s'intéresse à la sortie `VALIDATION: RMSEP` qui renseigne sur l'erreur quadratique moyenne de prédiction. On remarque qu'avec que la constante dans le modèle l'erreur est de 0.48. En rajoutant une nouvelle composante, on note une baisse signifiactive des erreur qui passe à 0.29. Un nouvelle ajout permet de diminuer l'erreur à 0.22. Mais à partir de l'ajout de la troisièmes composantes, l'erreur quadratique ne change plus significativement. On se propose donc de ne prendre que le deux premières composantes pour la réalisation du modèle.
+
+```{r}
+selectNcomp(plsdonnee, method = "randomization", plot = T)
+```
+On confirme le choix du nombre de composante par ce graphique qui utilise la technique de permutation avec comme variable explicative les différentes composante et nous permet de sélectionner le nombre optimal.
+
+```{r}
+ncomponents = 2
+pls.reduction.matrix <- plsdonnee$loadings[, 1:ncomponents]   
+donnee.train$pls.reducedX <- plsdonnee$scores[, 1:ncomponents]
+pls.model <- glm(Y ~ pls.reducedX, data = donnee.train, family = binomial)
+summary(pls.model)
+```
+Par contre avec la régression logistique, l'algorithme ne converge pas pour les deux premières composante. On prend que la première.
+
+```{r}
+donnee.train$pls.reducedX <- as.matrix(plsdonnee$scores[, 1])
+pls.model1 <- glm(Y ~ pls.reducedX, data = donnee.train, family = binomial)
+summary(pls.model)
+anova(pls.model1,pls.model,  test = "LRT")
+```
+Estimons l'erreur quadratique moyen de notre modèle à partir des données de test.
+
+```{r}
+# projection des individus
+pls.reduction.matrix <- as.matrix(plsdonnee$loadings[, 1:2])   
+donnee.test$pls.reducedX <- x_test_centered %*% pls.reduction.matrix
+test.prediction2 <- predict(pls.model, newdata = donnee.test, type="response")
+mean((test.prediction2-donnee.test$Y)^2)
+
+table(test.prediction2> 0.5, donnee.test$Y)
+```
+
+En conclusion pour l'ACP, on retient les composantes deux et trois qui sont associé au type de leucémie. On peut par exemple visualiser les gènes qui contribuent le plus a la formations de ces axes. 
+
+Nous avons retenue les composantes deux et trois pour notre modèle. L'objectif étant d'étudier le lien entre les gènes et le type de leucémie on se propose de visualiser les gènes qui contribue le plus a la formation de ces deux axes
+
+```{r}
+
+acp = PCA(t(x), scale.unit = T, ncp = 3, graph = F)
+par(mfrow = c(1, 2))
+fviz_contrib(acp, choice = "var", axes = 2:3, top = 10)
+```
+
+On peut s'intéresser donc a ces gènes pour une étude d'enrichissement ou des analyse plus poussées.
